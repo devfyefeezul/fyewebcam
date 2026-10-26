@@ -22,6 +22,20 @@ public:
     }
     void** PutVoid() { return reinterpret_cast<void**>(Put()); }
 
+    // Takes a reference to |p| (AddRef).
+    void Set(T* p) {
+        if (p) p->AddRef();
+        Reset();
+        p_ = p;
+    }
+
+    // Hands the pointer to the caller without releasing it.
+    T* Detach() {
+        T* p = p_;
+        p_ = nullptr;
+        return p;
+    }
+
     void Reset() {
         if (p_) {
             p_->Release();

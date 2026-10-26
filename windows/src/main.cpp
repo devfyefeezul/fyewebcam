@@ -10,9 +10,11 @@
 
 #include <cstdio>
 #include <string>
+#include <thread>
 
 #include "protocol.h"
 #include "stream_client.h"
+#include "vcam.h"
 
 namespace {
 
@@ -44,8 +46,10 @@ enum ControlId {
     kIdMirror,
     kIdRotate,
     kIdFullscreen,
+    kIdVcam,
 };
 constexpr UINT_PTR kStatsTimer = 1;
+constexpr UINT WM_APP_VCAM_DONE = WM_APP + 20;  // wParam: exit code of the elevated helper
 constexpr int kPanelWidth = 300;  // in DIPs
 
 struct App {
@@ -60,6 +64,7 @@ struct App {
     HWND lbl_connection, wifi, usb, lbl_host, host, lbl_port, port, connect;
     HWND lbl_camera, lbl_lens, lens, lbl_res, resolution;
     HWND lbl_status, status, stats;
+    HWND lbl_vcam, vcam_text, vcam_btn;
     HWND mirror_btn, rotate_btn, fullscreen_btn;
 
     StreamClient client;
@@ -69,6 +74,8 @@ struct App {
     bool has_frame = false;
     bool mirror = false;
     int rotation = 0;  // degrees clockwise: 0, 90, 180, 270
+    vcam::Writer vcam_writer;
+    bool vcam_busy = false;
 
     bool fullscreen = false;
     WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};
@@ -143,7 +150,7 @@ void ApplyFonts() {
             return TRUE;
         },
         0);
-    for (HWND h : {g.lbl_connection, g.lbl_camera, g.lbl_status}) {
+    for (HWND h : {g.lbl_connection, g.lbl_camera, g.lbl_status, g.lbl_vcam}) {
         SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g.font_bold), TRUE);
     }
 }
@@ -188,7 +195,11 @@ void Layout() {
 
     place(g.lbl_status, x, Dp(360), w, Dp(18));
     place(g.status, x, Dp(384), w, Dp(64));
-    place(g.stats, x, Dp(456), w, Dp(20));
+    place(g.stats, x, Dp(452), w, Dp(20));
+
+    place(g.lbl_vcam, x, Dp(500), w, Dp(18));
+    place(g.vcam_text, x, Dp(524), w, Dp(54));
+    place(g.vcam_btn, x, Dp(582), w, Dp(36));
 
     const int bw = Dp(110);
     const int bh = Dp(36);
@@ -201,13 +212,47 @@ void Layout() {
 
 void ShowPanel(bool show) {
     for (HWND h : {g.lbl_connection, g.wifi, g.usb, g.lbl_host, g.host, g.lbl_port, g.port, g.connect, g.lbl_camera,
-                   g.lbl_lens, g.lens, g.lbl_res, g.resolution, g.lbl_status, g.status, g.stats, g.mirror_btn,
+                   g.lbl_lens, g.lens, g.lbl_res, g.resolution, g.lbl_status, g.status, g.stats, g.lbl_vcam, g.vcam_text, g.vcam_btn, g.mirror_btn,
                    g.rotate_btn, g.fullscreen_btn}) {
         ShowWindow(h, show ? SW_SHOW : SW_HIDE);
     }
 }
 
 void SetStatus(const std::wstring& text) { SetWindowTextW(g.status, text.c_str()); }
+
+void UpdateVcamUi() {
+    if (!vcam::Supported()) {
+        SetWindowTextW(g.vcam_text, L"Needs Windows 11.");
+        SetWindowTextW(g.vcam_btn, L"Install virtual webcam");
+        EnableWindow(g.vcam_btn, FALSE);
+        return;
+    }
+    const bool installed = vcam::Installed();
+    std::wstring text;
+    if (!installed) {
+        text = L"Install once to use the phone as a camera in Zoom, Teams, OBS and browsers.";
+    } else if (g.vcam_writer.Active()) {
+        text = L"In use. Apps see \u201cfyewebcam\u201d as a camera.";
+    } else {
+        text = L"Installed. Pick \u201cfyewebcam\u201d as the camera in any app.";
+    }
+    SetWindowTextW(g.vcam_text, text.c_str());
+    SetWindowTextW(g.vcam_btn, installed ? L"Remove virtual webcam" : L"Install virtual webcam");
+    EnableWindow(g.vcam_btn, !g.vcam_busy);
+}
+
+void ToggleVcam() {
+    if (g.vcam_busy) return;
+    g.vcam_busy = true;
+    const bool installed = vcam::Installed();
+    SetWindowTextW(g.vcam_text, installed ? L"Removing... approve the Windows prompt." : L"Installing... approve the Windows prompt.");
+    EnableWindow(g.vcam_btn, FALSE);
+    HWND wnd = g.wnd;
+    std::thread([wnd, installed] {
+        int code = vcam::RunElevated(installed ? L"--uninstall-vcam" : L"--install-vcam");
+        PostMessageW(wnd, WM_APP_VCAM_DONE, static_cast<WPARAM>(code), 0);
+    }).detach();
+}
 
 void UpdateConnectButton() {
     SetWindowTextW(g.connect, g.client.Running() ? L"Disconnect" : L"Connect");
@@ -433,6 +478,10 @@ void CreateControls() {
     g.status = MakeControl(L"STATIC", L"Not connected.", SS_LEFT);
     g.stats = MakeControl(L"STATIC", L"", SS_LEFT);
 
+    g.lbl_vcam = MakeControl(L"STATIC", L"VIRTUAL WEBCAM", SS_LEFT);
+    g.vcam_text = MakeControl(L"STATIC", L"", SS_LEFT);
+    g.vcam_btn = MakeControl(L"BUTTON", L"Install virtual webcam", BS_PUSHBUTTON | WS_TABSTOP, kIdVcam);
+
     g.mirror_btn = MakeControl(L"BUTTON", L"Mirror", BS_PUSHBUTTON | WS_TABSTOP, kIdMirror);
     g.rotate_btn = MakeControl(L"BUTTON", L"Rotate", BS_PUSHBUTTON | WS_TABSTOP, kIdRotate);
     g.fullscreen_btn = MakeControl(L"BUTTON", L"Full screen", BS_PUSHBUTTON | WS_TABSTOP, kIdFullscreen);
@@ -447,7 +496,7 @@ void CreateControls() {
     }
 
     // Dark themes for the common controls (Windows 10 1809 and later; ignored elsewhere).
-    for (HWND h : {g.connect, g.mirror_btn, g.rotate_btn, g.fullscreen_btn}) SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
+    for (HWND h : {g.connect, g.vcam_btn, g.mirror_btn, g.rotate_btn, g.fullscreen_btn}) SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
     for (HWND h : {g.lens, g.resolution, g.host, g.port}) SetWindowTheme(h, L"DarkMode_CFD", nullptr);
     // Unthemed radios so WM_CTLCOLORSTATIC can color their labels.
     for (HWND h : {g.wifi, g.usb}) SetWindowTheme(h, L"", L"");
@@ -460,6 +509,7 @@ void CreateControls() {
     DWORD res = RegDword(L"Resolution", 1);
     ComboBox_SetCurSel(g.resolution, res < 3 ? res : 1);
     UpdateConnectButton();
+    UpdateVcamUi();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -490,7 +540,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            mmi->ptMinTrackSize = {Dp(760), Dp(520)};
+            mmi->ptMinTrackSize = {Dp(760), Dp(660)};
             return 0;
         }
         case WM_ERASEBKGND:
@@ -502,7 +552,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORBTN: {
             HDC dc = reinterpret_cast<HDC>(wp);
             HWND ctl = reinterpret_cast<HWND>(lp);
-            const bool heading = ctl == g.lbl_connection || ctl == g.lbl_camera || ctl == g.lbl_status;
+            const bool heading = ctl == g.lbl_connection || ctl == g.lbl_camera || ctl == g.lbl_status || ctl == g.lbl_vcam;
             const bool field_label = ctl == g.lbl_host || ctl == g.lbl_port || ctl == g.lbl_lens || ctl == g.lbl_res;
             SetTextColor(dc, heading || field_label ? kMuted : kText);
             SetBkColor(dc, kPanel);
@@ -559,6 +609,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case kIdFullscreen:
                     ToggleFullscreen();
                     return 0;
+                case kIdVcam:
+                    ToggleVcam();
+                    return 0;
             }
             break;
         }
@@ -592,7 +645,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == g.client.Session() && g.client.TakeFrame(&g.raw)) {
                 RotateFrame(g.raw, &g.shown);
                 g.has_frame = true;
+                const bool was_active = g.vcam_writer.Active();
+                g.vcam_writer.Write(g.shown);
+                if (was_active != g.vcam_writer.Active()) UpdateVcamUi();
                 InvalidateVideo();
+            }
+            return 0;
+        case WM_APP_VCAM_DONE:
+            g.vcam_busy = false;
+            UpdateVcamUi();
+            if (static_cast<int>(wp) > 0) {
+                SetWindowTextW(g.vcam_text, L"That didn\u2019t work. Try again, or run fyewebcam as administrator.");
             }
             return 0;
         case WM_APP_DISCONNECTED:
@@ -613,7 +676,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int show) {
+    // Elevated helper modes, started by the "Install/Remove virtual webcam" button.
+    const bool install = wcsstr(cmdline, L"--install-vcam") != nullptr;
+    if (install || wcsstr(cmdline, L"--uninstall-vcam") != nullptr) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::wstring error;
+        const bool ok = install ? vcam::Install(&error) : vcam::Uninstall(&error);
+        if (!ok) MessageBoxW(nullptr, error.c_str(), L"fyewebcam", MB_ICONERROR | MB_OK);
+        CoUninitialize();
+        return ok ? 0 : 1;
+    }
+
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

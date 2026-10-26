@@ -9,6 +9,7 @@ add_executable(fyewebcam WIN32
     src/stream_client.cpp
     src/h264_decoder.cpp
     src/adb.cpp
+    src/vcam.cpp
     src/app.rc
 )
 
@@ -17,6 +18,17 @@ target_compile_definitions(fyewebcam PRIVATE
 
 target_link_libraries(fyewebcam PRIVATE
     ws2_32 mfplat mfuuid ole32 comctl32 uxtheme dwmapi gdi32 user32 shell32 advapi32)
+
+# Virtual camera media source, loaded by the Windows Camera Frame Server. Needs the Windows 11 SDK
+# headers, so it is built with MSVC only.
+if(MSVC)
+    add_library(fyewebcam_vcam SHARED vcam/dllmain.cpp vcam/media_source.cpp vcam/vcam.def)
+    target_compile_definitions(fyewebcam_vcam PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(fyewebcam_vcam PRIVATE /W4 /utf-8)
+    set_property(TARGET fyewebcam_vcam PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(fyewebcam_vcam PRIVATE mfplat mfuuid ole32 advapi32)
+    add_dependencies(fyewebcam fyewebcam_vcam)
+endif()
 
 if(MSVC)
     target_compile_options(fyewebcam PRIVATE /W4 /utf-8)
