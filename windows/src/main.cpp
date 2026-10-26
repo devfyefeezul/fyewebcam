@@ -501,8 +501,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HDC dc = reinterpret_cast<HDC>(wp);
             HWND ctl = reinterpret_cast<HWND>(lp);
             const bool heading = ctl == g.lbl_connection || ctl == g.lbl_camera || ctl == g.lbl_status;
-            const bool small = ctl == g.lbl_host || ctl == g.lbl_port || ctl == g.lbl_lens || ctl == g.lbl_res;
-            SetTextColor(dc, heading || small ? kMuted : kText);
+            const bool field_label = ctl == g.lbl_host || ctl == g.lbl_port || ctl == g.lbl_lens || ctl == g.lbl_res;
+            SetTextColor(dc, heading || field_label ? kMuted : kText);
             SetBkColor(dc, kPanel);
             return reinterpret_cast<LRESULT>(g.panel_brush);
         }
