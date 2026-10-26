@@ -119,10 +119,11 @@ bool Install(std::wstring* error) {
     const std::wstring src = ExeDir() + L"\\" + kDllName;
     CreateDirectoryW(dir.c_str(), nullptr);
     if (_wcsicmp(src.c_str(), dst.c_str()) != 0 && !CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-        // The Frame Server may have the old DLL loaded: move it aside and copy again.
-        std::wstring old = dst + L".old";
-        DeleteFileW(old.c_str());
-        MoveFileExW(dst.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+        // The Frame Server services may have the old DLL loaded. A loaded DLL can't be overwritten but
+        // can be renamed, so move it aside (under a fresh name, since an earlier .old may be loaded
+        // too) and copy again. The old copy is deleted at the next reboot.
+        std::wstring old = dst + L"." + std::to_wstring(GetTickCount64()) + L".old";
+        MoveFileExW(dst.c_str(), old.c_str(), 0);
         MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
         if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
             *error = L"Could not copy " + std::wstring(kDllName) + L" to " + dir + L".";
