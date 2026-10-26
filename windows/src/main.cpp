@@ -85,6 +85,7 @@ struct App {
     int rotation = 0;  // degrees clockwise: 0, 90, 180, 270
     vcam::Writer vcam_writer;
     bool vcam_busy = false;
+    bool vcam_missing = false;  // registered, but Windows doesn't list the camera
 
     bool blur = false;
     int blur_strength = kDefaultBlurStrength;  // 1..10
@@ -243,7 +244,8 @@ void ShowPanel(bool show) {
 
 void SetStatus(const std::wstring& text) { SetWindowTextW(g.status, text.c_str()); }
 
-void UpdateVcamUi() {
+// |recheck| asks Windows whether the camera is listed (slow-ish, so not on every frame).
+void UpdateVcamUi(bool recheck = false) {
     if (!vcam::Supported()) {
         SetWindowTextW(g.vcam_text, L"Needs Windows 11.");
         SetWindowTextW(g.vcam_btn, L"Install virtual webcam");
@@ -251,28 +253,35 @@ void UpdateVcamUi() {
         return;
     }
     const bool installed = vcam::Installed();
+    if (recheck) g.vcam_missing = installed && !vcam::Present();
+    if (!installed) g.vcam_missing = false;
     std::wstring text;
     if (!installed) {
         text = L"Install once to use the phone as a camera in Zoom, Teams, OBS and browsers.";
+    } else if (g.vcam_missing) {
+        text = L"Windows dropped the webcam (this can happen after a restart). Repair brings it back.";
     } else if (g.vcam_writer.Active()) {
         text = L"In use. Apps see \u201cfyewebcam\u201d as a camera.";
     } else {
         text = L"Installed. Pick \u201cfyewebcam\u201d as the camera in any app.";
     }
     SetWindowTextW(g.vcam_text, text.c_str());
-    SetWindowTextW(g.vcam_btn, installed ? L"Remove virtual webcam" : L"Install virtual webcam");
+    SetWindowTextW(g.vcam_btn, !installed       ? L"Install virtual webcam"
+                               : g.vcam_missing ? L"Repair virtual webcam"
+                                                : L"Remove virtual webcam");
     EnableWindow(g.vcam_btn, !g.vcam_busy);
 }
 
 void ToggleVcam() {
     if (g.vcam_busy) return;
     g.vcam_busy = true;
-    const bool installed = vcam::Installed();
-    SetWindowTextW(g.vcam_text, installed ? L"Removing... approve the Windows prompt." : L"Installing... approve the Windows prompt.");
+    // Repairing a dropped webcam is the same as installing it.
+    const bool remove = vcam::Installed() && !g.vcam_missing;
+    SetWindowTextW(g.vcam_text, remove ? L"Removing... approve the Windows prompt." : L"Installing... approve the Windows prompt.");
     EnableWindow(g.vcam_btn, FALSE);
     HWND wnd = g.wnd;
-    std::thread([wnd, installed] {
-        int code = vcam::RunElevated(installed ? L"--uninstall-vcam" : L"--install-vcam");
+    std::thread([wnd, remove] {
+        int code = vcam::RunElevated(remove ? L"--uninstall-vcam" : L"--install-vcam");
         PostMessageW(wnd, WM_APP_VCAM_DONE, static_cast<WPARAM>(code), 0);
     }).detach();
 }
@@ -578,7 +587,7 @@ void CreateControls() {
     DWORD res = RegDword(L"Resolution", 1);
     ComboBox_SetCurSel(g.resolution, res < 3 ? res : 1);
     UpdateConnectButton();
-    UpdateVcamUi();
+    UpdateVcamUi(true);
     const DWORD strength = RegDword(L"BlurStrength", kDefaultBlurStrength);
     g.blur_strength = strength >= 1 && strength <= 10 ? static_cast<int>(strength) : kDefaultBlurStrength;
     SendMessageW(g.strength, TBM_SETPOS, TRUE, g.blur_strength);
@@ -751,7 +760,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_VCAM_DONE:
             g.vcam_busy = false;
-            UpdateVcamUi();
+            UpdateVcamUi(true);
             if (static_cast<int>(wp) > 0) {
                 SetWindowTextW(g.vcam_text, L"That didn\u2019t work. Try again, or run fyewebcam as administrator.");
             }

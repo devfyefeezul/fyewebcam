@@ -1,6 +1,8 @@
 #include "vcam.h"
 
 #include <mfapi.h>
+#include <mferror.h>
+#include <mfidl.h>
 #include <shellapi.h>
 #include <sddl.h>
 #include <shlobj.h>
@@ -112,6 +114,32 @@ bool Installed() {
     return true;
 }
 
+bool Present() {
+    if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return false;
+    bool found = false;
+    IMFAttributes* attrs = nullptr;
+    if (SUCCEEDED(MFCreateAttributes(&attrs, 1)) &&
+        SUCCEEDED(attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID))) {
+        IMFActivate** devices = nullptr;
+        UINT32 count = 0;
+        if (SUCCEEDED(MFEnumDeviceSources(attrs, &devices, &count))) {
+            for (UINT32 i = 0; i < count; ++i) {
+                WCHAR* name = nullptr;
+                UINT32 length = 0;
+                if (!found && SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length))) {
+                    found = wcscmp(name, L"fyewebcam") == 0;
+                    CoTaskMemFree(name);
+                }
+                devices[i]->Release();
+            }
+            CoTaskMemFree(devices);
+        }
+    }
+    if (attrs) attrs->Release();
+    MFShutdown();
+    return found;
+}
+
 bool Install(std::wstring* error) {
 #ifdef FYE_HAVE_VCAM
     const std::wstring dir = InstallDir();
@@ -162,7 +190,9 @@ bool Uninstall(std::wstring* error) {
     if (SUCCEEDED(hr)) hr = camera->Remove();
     if (camera) camera->Release();
     MFShutdown();
-    if (FAILED(hr)) {
+    // MF_E_INVALIDREQUEST: Windows has no such camera any more (dropped at a restart, say). Carry on
+    // and clean up the registration and the DLL anyway.
+    if (FAILED(hr) && hr != MF_E_INVALIDREQUEST) {
         *error = HrText(L"Removing the virtual camera", hr);
         return false;
     }

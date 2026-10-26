@@ -14,6 +14,9 @@ namespace vcam {
 bool Supported();
 // True when the camera DLL is registered for the Frame Server.
 bool Installed();
+// True when Windows currently lists the "fyewebcam" camera. It can be registered yet missing, for
+// example after a restart, and then needs installing again.
+bool Present();
 
 // Run from an elevated instance of the app ("--install-vcam" / "--uninstall-vcam").
 bool Install(std::wstring* error);

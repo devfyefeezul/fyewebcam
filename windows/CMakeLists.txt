@@ -17,7 +17,7 @@ target_compile_definitions(fyewebcam PRIVATE
     UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 
 target_link_libraries(fyewebcam PRIVATE
-    ws2_32 mfplat mfuuid ole32 comctl32 uxtheme dwmapi gdi32 user32 shell32 advapi32)
+    ws2_32 mf mfplat mfuuid ole32 comctl32 uxtheme dwmapi gdi32 user32 shell32 advapi32)
 
 # Virtual camera media source, loaded by the Windows Camera Frame Server. Needs the Windows 11 SDK
 # headers, so it is built with MSVC only.
