@@ -26,6 +26,8 @@ object Protocol {
 
     const val CAMERA_BACK = 0
     const val CAMERA_FRONT = 1
+    /** Handshake only: keep the camera picked on the phone. */
+    const val CAMERA_KEEP = 0xFF
 
     const val FRAME_CONFIG = 1
     const val FRAME_KEY = 2

@@ -20,6 +20,7 @@ constexpr uint8_t kCodecH264 = 1;
 
 constexpr uint8_t kCameraBack = 0;
 constexpr uint8_t kCameraFront = 1;
+constexpr uint8_t kCameraKeep = 0xFF;  // handshake only: keep the camera picked on the phone
 
 constexpr uint8_t kFrameConfig = 1;
 constexpr uint8_t kFrameKey = 2;

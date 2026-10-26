@@ -117,7 +117,16 @@ bool StreamClient::RecvAll(uint8_t* buf, size_t len) {
         SOCKET s = socket_;
         if (s == INVALID_SOCKET) return false;
         int n = recv(s, reinterpret_cast<char*>(buf + got), static_cast<int>(len - got), 0);
-        if (n <= 0) return false;
+        if (n == 0) {
+            recv_error_ = L"The phone closed the connection.";
+            return false;
+        }
+        if (n < 0) {
+            int err = WSAGetLastError();
+            recv_error_ = err == WSAETIMEDOUT ? L"No data from the phone for 8 seconds."
+                                              : L"Network error " + std::to_wstring(err) + L".";
+            return false;
+        }
         got += static_cast<size_t>(n);
     }
     return true;
@@ -186,7 +195,7 @@ void StreamClient::Run(ConnectOptions options) {
         send(socket_, reinterpret_cast<const char*>(hello), sizeof(hello), 0);
     }
     if (!RecvAll(reply_bytes, sizeof(reply_bytes)) || !proto::ParseReply(reply_bytes, &reply)) {
-        Fail(L"The phone did not answer. Make sure fyewebcam is streaming on the phone.");
+        Fail(L"The phone did not answer. Make sure fyewebcam is streaming on the phone. " + recv_error_);
         CoUninitialize();
         return;
     }
@@ -209,12 +218,16 @@ void StreamClient::Run(ConnectOptions options) {
     std::vector<uint8_t> unit;
     Frame decoded;
     bool waiting_for_key = true;
+    std::wstring lost_reason;
 
     for (;;) {
         uint8_t header_bytes[proto::kFrameHeaderSize];
         if (!RecvAll(header_bytes, sizeof(header_bytes))) break;
         proto::FrameHeader header = proto::ParseFrameHeader(header_bytes);
-        if (header.length > 16 * 1024 * 1024) break;
+        if (header.length > 16 * 1024 * 1024) {
+            lost_reason = L"The phone sent a bad frame header.";
+            break;
+        }
         payload.resize(header.length);
         if (!RecvAll(payload.data(), payload.size())) break;
         bytes_ += static_cast<int64_t>(proto::kFrameHeaderSize + header.length);
@@ -233,7 +246,7 @@ void StreamClient::Run(ConnectOptions options) {
         if (header.type == proto::kFrameKey) {
             if (!decoder_open) {
                 if (!decoder.Open(stream_w, stream_h, reply.fps)) {
-                    Fail(L"Could not start the H.264 decoder.");
+                    lost_reason = L"Could not start the Windows H.264 decoder.";
                     break;
                 }
                 decoder_open = true;
@@ -261,6 +274,7 @@ void StreamClient::Run(ConnectOptions options) {
     decoder.Close();
     SOCKET s = socket_.exchange(INVALID_SOCKET);
     if (s != INVALID_SOCKET) closesocket(s);
-    Fail(L"Connection to the phone was lost.");
+    if (lost_reason.empty()) lost_reason = L"Connection to the phone was lost. " + recv_error_;
+    Fail(lost_reason);
     CoUninitialize();
 }

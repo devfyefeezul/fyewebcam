@@ -26,7 +26,7 @@ struct ConnectOptions {
     int width = 1280;
     int height = 720;
     int fps = 30;
-    int camera = 0;
+    int camera = 0xFF;  // proto::kCameraKeep: use the phone's choice
 };
 
 class StreamClient {
@@ -76,6 +76,7 @@ private:
     std::mutex text_mutex_;
     std::wstring error_;
     std::wstring status_;
+    std::wstring recv_error_;  // only touched by the worker thread
     std::atomic<int> session_{0};
     std::atomic<int> reply_width_{0};
     std::atomic<int> reply_height_{0};

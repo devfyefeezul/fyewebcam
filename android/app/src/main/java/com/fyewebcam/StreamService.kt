@@ -149,7 +149,11 @@ class StreamService : LifecycleService(), StreamServer.Controller {
         val current = StreamState.state.value
         val preset = if (request.height > 0) Preset.closest(request.height) else current.preset
         val fps = if (request.fps in 1..60) request.fps else current.fps
-        val camera = if (request.camera == Protocol.CAMERA_FRONT) Protocol.CAMERA_FRONT else Protocol.CAMERA_BACK
+        // The camera picked on the phone wins unless the PC explicitly asks for one.
+        val camera = when (request.camera) {
+            Protocol.CAMERA_BACK, Protocol.CAMERA_FRONT -> request.camera
+            else -> current.camera
+        }
         val changed = preset != current.preset || fps != current.fps || camera != current.camera || enc.settings == null
         val before = enc.generation
         if (changed) {

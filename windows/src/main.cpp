@@ -109,14 +109,13 @@ void SaveSettings() {
     GetWindowTextW(g.host, host, 256);
     RegSetValueExW(key, L"Host", 0, REG_SZ, reinterpret_cast<const BYTE*>(host),
                    static_cast<DWORD>((wcslen(host) + 1) * sizeof(wchar_t)));
-    DWORD values[4] = {
+    DWORD values[3] = {
         static_cast<DWORD>(GetDlgItemInt(g.wnd, kIdPort, nullptr, FALSE)),
         static_cast<DWORD>(Button_GetCheck(g.usb) == BST_CHECKED),
-        static_cast<DWORD>(ComboBox_GetCurSel(g.lens)),
         static_cast<DWORD>(ComboBox_GetCurSel(g.resolution)),
     };
-    const wchar_t* names[4] = {L"Port", L"Usb", L"Lens", L"Resolution"};
-    for (int i = 0; i < 4; ++i) {
+    const wchar_t* names[3] = {L"Port", L"Usb", L"Resolution"};
+    for (int i = 0; i < 3; ++i) {
         RegSetValueExW(key, names[i], 0, REG_DWORD, reinterpret_cast<const BYTE*>(&values[i]), sizeof(DWORD));
     }
     RegCloseKey(key);
@@ -278,7 +277,9 @@ void Connect() {
     options.width = preset.width;
     options.height = preset.height;
     options.fps = kFps;
-    options.camera = ComboBox_GetCurSel(g.lens) == 1 ? proto::kCameraFront : proto::kCameraBack;
+    // The camera picked on the phone always wins when connecting. The PC can switch it afterwards.
+    options.camera = proto::kCameraKeep;
+    ComboBox_SetCurSel(g.lens, 0);
     SaveSettings();
     g.client.Start(options, g.wnd);
     UpdateConnectButton();
@@ -436,6 +437,7 @@ void CreateControls() {
     g.rotate_btn = MakeControl(L"BUTTON", L"Rotate", BS_PUSHBUTTON | WS_TABSTOP, kIdRotate);
     g.fullscreen_btn = MakeControl(L"BUTTON", L"Full screen", BS_PUSHBUTTON | WS_TABSTOP, kIdFullscreen);
 
+    ComboBox_AddString(g.lens, L"Phone's choice");
     ComboBox_AddString(g.lens, L"Back camera");
     ComboBox_AddString(g.lens, L"Front camera");
     for (const Preset& p : kPresets) {
@@ -454,7 +456,7 @@ void CreateControls() {
     SetWindowTextW(g.host, RegString(L"Host", L"").c_str());
     SetDlgItemInt(g.wnd, kIdPort, RegDword(L"Port", proto::kDefaultPort), FALSE);
     Button_SetCheck(RegDword(L"Usb", 0) ? g.usb : g.wifi, BST_CHECKED);
-    ComboBox_SetCurSel(g.lens, RegDword(L"Lens", 0) == 1 ? 1 : 0);
+    ComboBox_SetCurSel(g.lens, 0);
     DWORD res = RegDword(L"Resolution", 1);
     ComboBox_SetCurSel(g.resolution, res < 3 ? res : 1);
     UpdateConnectButton();
@@ -531,7 +533,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 case kIdLens:
                     if (code == CBN_SELCHANGE) {
-                        if (g.connected) g.client.SendSwitchCamera(ComboBox_GetCurSel(g.lens));
+                        const int lens = ComboBox_GetCurSel(g.lens);
+                        if (g.connected && lens > 0) {
+                            g.client.SendSwitchCamera(lens == 2 ? proto::kCameraFront : proto::kCameraBack);
+                        }
                         SaveSettings();
                     }
                     return 0;

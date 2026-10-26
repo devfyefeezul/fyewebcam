@@ -12,8 +12,8 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * TCP server that the Windows client connects to. One viewer at a time: a new connection replaces
- * the old one. Frames are queued per client and dropped (until the next keyframe) when the
+ * TCP server that the Windows client connects to. One viewer at a time: a new connection that
+ * completes the handshake replaces the old one. Frames are queued per client and dropped (until the next keyframe) when the
  * client falls behind, so latency stays low instead of building up.
  */
 class StreamServer(private val port: Int, private val controller: Controller) {
@@ -91,9 +91,9 @@ class StreamServer(private val port: Int, private val controller: Controller) {
                 break
             }
             socket.tcpNoDelay = true
-            client?.close()
+            // The current viewer is only replaced once the newcomer passes the handshake, so a stray
+            // connection (another webcam app probing the port, say) can't kick it off.
             val c = Client(socket)
-            client = c
             Thread({ handle(c) }, "stream-client").start()
         }
     }
@@ -110,6 +110,8 @@ class StreamServer(private val port: Int, private val controller: Controller) {
                 out.flush()
                 throw e
             }
+            client?.close()
+            client = c
             val actual = controller.configure(request)
             if (actual == null) {
                 out.write(Protocol.handshakeReply(Protocol.STATUS_CAMERA_ERROR, 0, 0, 0))
