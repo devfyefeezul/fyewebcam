@@ -154,7 +154,11 @@ bool Install(std::wstring* error) {
         MoveFileExW(dst.c_str(), old.c_str(), 0);
         MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
         if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-            *error = L"Could not copy " + std::wstring(kDllName) + L" to " + dir + L".";
+            const DWORD code = GetLastError();
+            *error = GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES
+                         ? std::wstring(kDllName) + L" is missing from the app folder (" + ExeDir() + L")."
+                         : L"Could not copy " + std::wstring(kDllName) + L" to " + dir + L" (error " +
+                               std::to_wstring(code) + L").";
             return false;
         }
     }
