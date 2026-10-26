@@ -79,26 +79,51 @@ bool FrameReader::EnsureMapping() {
 }
 
 void FrameReader::Fill(uint8_t* dst, LONG pitch, UINT32 width, UINT32 height) {
-    uint8_t* y_plane = dst;
-    uint8_t* uv_plane = dst + static_cast<size_t>(pitch) * height;
-
     auto* header = EnsureMapping() ? static_cast<shared_frame::Header*>(view_) : nullptr;
-    const uint32_t seq = header ? header->sequence : 0;
-    MemoryBarrier();
-    const bool live = header && header->magic == shared_frame::kMagic && (seq & 1) == 0 && header->width > 0 &&
-                      header->height > 0 && header->width * header->height <= shared_frame::kMaxPixels &&
+    const bool live = header && header->magic == shared_frame::kMagic && header->width > 0 && header->height > 0 &&
+                      header->width * header->height <= shared_frame::kMaxPixels &&
                       static_cast<int64_t>(GetTickCount64()) - header->write_time < 2000;
     if (live != last_live_) {
         vlog::Write("Frames from the app: %s", live ? "receiving" : "none (placeholder)");
         last_live_ = live;
     }
+
+    const size_t y_size = static_cast<size_t>(width) * height;
     if (!live) {
         // Placeholder: dark grey.
-        for (UINT32 y = 0; y < height; ++y) memset(y_plane + static_cast<size_t>(y) * pitch, 40, width);
-        for (UINT32 y = 0; y < height / 2; ++y) memset(uv_plane + static_cast<size_t>(y) * pitch, 128, width);
-        return;
+        cache_.assign(y_size * 3 / 2, 128);
+        memset(cache_.data(), 40, y_size);
+        cache_valid_ = false;
+    } else {
+        // The writer bumps the sequence to odd while it copies. Wait briefly for it to finish so
+        // we don't convert a half-written frame.
+        uint32_t seq = header->sequence;
+        for (int i = 0; (seq & 1) != 0 && i < 20; ++i) {
+            Sleep(0);
+            seq = header->sequence;
+        }
+        MemoryBarrier();
+        const bool same = cache_valid_ && seq == cache_seq_ && width == cache_width_ && height == cache_height_;
+        if (!same) {
+            cache_.resize(y_size * 3 / 2);
+            Convert(header, cache_.data(), width, height);
+            MemoryBarrier();
+            // Reuse the conversion only if the writer didn't touch the frame meanwhile.
+            cache_valid_ = (seq & 1) == 0 && header->sequence == seq;
+            cache_seq_ = seq;
+            cache_width_ = width;
+            cache_height_ = height;
+        }
     }
 
+    for (UINT32 y = 0; y < height * 3 / 2; ++y) {
+        memcpy(dst + static_cast<size_t>(y) * pitch, cache_.data() + static_cast<size_t>(y) * width, width);
+    }
+}
+
+void FrameReader::Convert(const shared_frame::Header* header, uint8_t* dst, UINT32 width, UINT32 height) {
+    uint8_t* y_plane = dst;
+    uint8_t* uv_plane = dst + static_cast<size_t>(width) * height;
     const UINT32 sw = header->width;
     const UINT32 sh = header->height;
     const uint8_t* src = shared_frame::Pixels(view_);
@@ -115,14 +140,14 @@ void FrameReader::Fill(uint8_t* dst, LONG pitch, UINT32 width, UINT32 height) {
     const UINT32 ox = ((width - fw) / 2) & ~1u;
     const UINT32 oy = ((height - fh) / 2) & ~1u;
 
-    for (UINT32 y = 0; y < height; ++y) memset(y_plane + static_cast<size_t>(y) * pitch, 16, width);
-    for (UINT32 y = 0; y < height / 2; ++y) memset(uv_plane + static_cast<size_t>(y) * pitch, 128, width);
+    memset(y_plane, 16, static_cast<size_t>(width) * height);
+    memset(uv_plane, 128, static_cast<size_t>(width) * height / 2);
 
     // Nearest-neighbour scale and BT.601 limited-range RGB to NV12.
     for (UINT32 y = 0; y < fh; ++y) {
         const uint8_t* srow = src + static_cast<size_t>(y * sh / fh) * sw * 4;
-        uint8_t* yrow = y_plane + static_cast<size_t>(oy + y) * pitch + ox;
-        uint8_t* uvrow = (y & 1) == 0 ? uv_plane + static_cast<size_t>((oy + y) / 2) * pitch + ox : nullptr;
+        uint8_t* yrow = y_plane + static_cast<size_t>(oy + y) * width + ox;
+        uint8_t* uvrow = (y & 1) == 0 ? uv_plane + static_cast<size_t>((oy + y) / 2) * width + ox : nullptr;
         for (UINT32 x = 0; x < fw; ++x) {
             const uint8_t* p = srow + static_cast<size_t>(x * sw / fw) * 4;
             const int b = p[0], g = p[1], r = p[2];
@@ -133,8 +158,6 @@ void FrameReader::Fill(uint8_t* dst, LONG pitch, UINT32 width, UINT32 height) {
             }
         }
     }
-    // If the writer started a new frame while we copied, this one may tear slightly. That's
-    // acceptable for a webcam feed and avoids holding up the Frame Server.
 }
 
 // ---------------------------------------------------------------- MediaStream
@@ -254,6 +277,16 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
     }
     ++requests_;
 
+    // The Frame Server asks for the next sample as soon as one is delivered, so hold each request
+    // until its frame is due instead of producing hundreds of frames a second.
+    const LONGLONG now = MFGetSystemTime();
+    if (next_sample_time_ > now) {
+        const LONGLONG wait_ms = (next_sample_time_ - now) / 10000;
+        if (wait_ms > 0) Sleep(static_cast<DWORD>(std::min<LONGLONG>(wait_ms, 100)));
+    }
+    const LONGLONG due = MFGetSystemTime();
+    next_sample_time_ = std::max<LONGLONG>(next_sample_time_ + static_cast<LONGLONG>(frame_duration_), due);
+
     ComPtr<IMFSample> sample;
     HRESULT hr;
     if (allocator_) {
@@ -349,6 +382,7 @@ HRESULT MediaStream::Start(IMFMediaType* type) {
     }
     vlog::Write("Stream start %ux%u, allocator %s", width_, height_, allocator_ ? "yes" : "no");
     requests_ = 0;
+    next_sample_time_ = 0;
     state_ = MF_STREAM_STATE_RUNNING;
     return queue_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr);
 }
@@ -389,7 +423,6 @@ MediaSource::~MediaSource() {
 }
 
 HRESULT MediaSource::Initialize(IMFAttributes* attributes) {
-    vlog::Write("Media source created");
     HRESULT hr = MFCreateEventQueue(queue_.Put());
     if (FAILED(hr)) return hr;
     hr = MFCreateAttributes(attributes_.Put(), 4);
@@ -535,7 +568,6 @@ STDMETHODIMP MediaSource::Stop() {
 STDMETHODIMP MediaSource::Pause() { return MF_E_INVALID_STATE_TRANSITION; }
 
 STDMETHODIMP MediaSource::Shutdown() {
-    vlog::Write("Source Shutdown");
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
     shut_down_ = true;

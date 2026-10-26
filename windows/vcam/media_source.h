@@ -10,8 +10,10 @@
 
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include "../src/com_ptr.h"
+#include "../src/shared_frame.h"
 
 // IKsControl, declared here so the DLL doesn't need the DirectShow/KS proxy headers.
 MIDL_INTERFACE("28F54685-06FD-11D2-B27A-00A0C9223196")
@@ -36,10 +38,17 @@ public:
 
 private:
     bool EnsureMapping();
+    void Convert(const shared_frame::Header* header, uint8_t* dst, UINT32 width, UINT32 height);
 
     HANDLE mapping_ = nullptr;
     void* view_ = nullptr;
     bool last_live_ = false;
+    // The last converted frame (NV12, pitch = width), reused while the app hasn't sent a new one.
+    std::vector<uint8_t> cache_;
+    bool cache_valid_ = false;
+    uint32_t cache_seq_ = 0;
+    UINT32 cache_width_ = 0;
+    UINT32 cache_height_ = 0;
 };
 
 class MediaStream final : public IMFMediaStream2, public IKsControl {
@@ -95,6 +104,7 @@ private:
     UINT32 height_ = 0;
     UINT64 frame_duration_ = 333333;
     unsigned long long requests_ = 0;
+    LONGLONG next_sample_time_ = 0;
     FrameReader reader_;
     bool shut_down_ = false;
 };
