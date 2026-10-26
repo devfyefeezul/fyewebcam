@@ -8,6 +8,7 @@
 #include <shlobj.h>
 
 #include <cstring>
+#include <vector>
 
 #include "shared_frame.h"
 
@@ -114,6 +115,57 @@ bool Installed() {
     return true;
 }
 
+#ifdef FYE_HAVE_VCAM
+// Drops any delete-at-reboot queued for |path| (by an older uninstall), so the DLL just installed
+// survives the next restart.
+void CancelPendingDelete(const std::wstring& path) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager", 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return;
+    }
+    DWORD type = 0, size = 0;
+    if (RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, nullptr, &size) == ERROR_SUCCESS &&
+        type == REG_MULTI_SZ && size > 0) {
+        std::wstring data(size / sizeof(wchar_t) + 1, L'\0');
+        if (RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, nullptr,
+                             reinterpret_cast<BYTE*>(&data[0]), &size) == ERROR_SUCCESS) {
+            // Pairs of strings: source, then target (empty target means delete).
+            std::vector<std::wstring> items;
+            for (size_t i = 0; i < size / sizeof(wchar_t);) {
+                std::wstring item(data.c_str() + i);
+                i += item.size() + 1;
+                items.push_back(item);
+            }
+            const std::wstring native = L"\\??\\" + path;
+            std::wstring kept;
+            bool changed = false;
+            for (size_t i = 0; i + 1 < items.size(); i += 2) {
+                if (items[i + 1].empty() && _wcsicmp(items[i].c_str(), native.c_str()) == 0) {
+                    changed = true;
+                    continue;
+                }
+                kept += items[i];
+                kept.push_back(L'\0');
+                kept += items[i + 1];
+                kept.push_back(L'\0');
+            }
+            if (changed) {
+                if (kept.empty()) {
+                    RegDeleteValueW(key, L"PendingFileRenameOperations");
+                } else {
+                    kept.push_back(L'\0');
+                    RegSetValueExW(key, L"PendingFileRenameOperations", 0, REG_MULTI_SZ,
+                                   reinterpret_cast<const BYTE*>(kept.data()),
+                                   static_cast<DWORD>(kept.size() * sizeof(wchar_t)));
+                }
+            }
+        }
+    }
+    RegCloseKey(key);
+}
+#endif
+
 bool Present() {
     if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return false;
     bool found = false;
@@ -127,7 +179,8 @@ bool Present() {
                 WCHAR* name = nullptr;
                 UINT32 length = 0;
                 if (!found && SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length))) {
-                    found = wcscmp(name, L"fyewebcam") == 0;
+                    // Windows appends " (Windows Virtual Camera)" to the name we gave it.
+                    found = wcsncmp(name, L"fyewebcam", 9) == 0;
                     CoTaskMemFree(name);
                 }
                 devices[i]->Release();
@@ -162,6 +215,7 @@ bool Install(std::wstring* error) {
             return false;
         }
     }
+    CancelPendingDelete(dst);
     CreateLogDir();
     HRESULT hr = CallDllExport(dst, "DllRegisterServer");
     if (FAILED(hr)) {
@@ -202,7 +256,12 @@ bool Uninstall(std::wstring* error) {
     }
     const std::wstring dst = InstallDir() + L"\\" + kDllName;
     CallDllExport(dst, "DllUnregisterServer");
-    if (!DeleteFileW(dst.c_str())) MoveFileExW(dst.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    if (!DeleteFileW(dst.c_str())) {
+        // Still loaded by the Frame Server: move it aside and delete that copy at the next reboot.
+        // Never queue the real path, or a later reinstall's DLL would be deleted at boot.
+        std::wstring old = dst + L"." + std::to_wstring(GetTickCount64()) + L".old";
+        if (MoveFileExW(dst.c_str(), old.c_str(), 0)) MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
     return true;
 #else
     *error = L"This build has no virtual webcam support.";
