@@ -32,7 +32,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -163,33 +162,22 @@ private fun App(service: StreamService?, onStart: () -> Unit, onStop: () -> Unit
             )
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Label("Resolution")
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Surface)
-                    .border(1.dp, Line, RoundedCornerShape(12.dp))
-                    .padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Preset.entries.forEach { preset ->
-                    val selected = preset == state.preset
-                    Button(
-                        onClick = {
-                            if (service != null) service.applySettings(preset = preset)
-                            else StreamState.update { it.copy(preset = preset) }
-                        },
-                        modifier = Modifier.weight(1f).height(44.dp),
-                        shape = RoundedCornerShape(9.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selected) Line else Color.Transparent,
-                            contentColor = if (selected) Color.White else Body,
-                        ),
-                    ) { Text(preset.label, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium) }
-                }
-            }
+        Picker(
+            label = "Camera",
+            options = listOf(Protocol.CAMERA_BACK to "Back", Protocol.CAMERA_FRONT to "Front"),
+            selected = state.camera,
+        ) { camera ->
+            if (service != null) service.applySettings(camera = camera)
+            else StreamState.update { it.copy(camera = camera) }
+        }
+
+        Picker(
+            label = "Resolution",
+            options = Preset.entries.map { it to it.label },
+            selected = state.preset,
+        ) { preset ->
+            if (service != null) service.applySettings(preset = preset)
+            else StreamState.update { it.copy(preset = preset) }
         }
 
         Spacer(Modifier.weight(1f))
@@ -197,15 +185,6 @@ private fun App(service: StreamService?, onStart: () -> Unit, onStop: () -> Unit
         state.error?.let { Text(it, color = Color(0xFFF97316), fontSize = 13.sp) }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(
-                onClick = {
-                    val next = 1 - state.camera
-                    if (service != null) service.applySettings(camera = next)
-                    else StreamState.update { it.copy(camera = next) }
-                },
-                modifier = Modifier.height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-            ) { Text(if (state.camera == Protocol.CAMERA_FRONT) "Front" else "Back", color = Color.White) }
             Button(
                 onClick = {
                     if (state.running) {
@@ -238,7 +217,7 @@ private fun PreviewBox(service: StreamService?, state: StreamState.Value) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(240.dp)
+            .height(220.dp)
             .clip(RoundedCornerShape(20.dp))
             .background(Color(0xFF1B1F27))
             .border(1.dp, Line, RoundedCornerShape(20.dp)),
@@ -279,6 +258,36 @@ private fun PreviewBox(service: StreamService?, state: StreamState.Value) {
                         .background(Ground)
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
+            }
+        }
+    }
+}
+
+/** A row of mutually exclusive choices, used for the camera and the resolution. */
+@Composable
+private fun <T> Picker(label: String, options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Label(label)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Surface)
+                .border(1.dp, Line, RoundedCornerShape(12.dp))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            options.forEach { (value, text) ->
+                val isSelected = value == selected
+                Button(
+                    onClick = { onSelect(value) },
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    shape = RoundedCornerShape(9.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isSelected) Line else Color.Transparent,
+                        contentColor = if (isSelected) Color.White else Body,
+                    ),
+                ) { Text(text, fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium) }
             }
         }
     }
