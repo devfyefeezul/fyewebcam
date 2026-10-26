@@ -1,0 +1,19 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Windows client
+windows/build*/
+out/
+.vs/
+*.user
+
+# Tools
+*.h264
+__pycache__/
