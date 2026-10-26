@@ -2,6 +2,7 @@
 
 #include <mfapi.h>
 #include <shellapi.h>
+#include <sddl.h>
 #include <shlobj.h>
 
 #include <cstring>
@@ -80,6 +81,29 @@ bool Supported() {
 #endif
 }
 
+#ifdef FYE_HAVE_VCAM
+// The camera DLL logs to %ProgramData%\fyewebcam\vcam.log from inside the Frame Server, which
+// runs as LocalService, so the folder has to be writable for that account.
+void CreateLogDir() {
+    wchar_t base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", base, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::wstring dir = std::wstring(base) + L"\\fyewebcam";
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;LS)(A;OICI;GRGWGX;;;BU)", SDDL_REVISION_1, &sd,
+            nullptr)) {
+        return;
+    }
+    if (!CreateDirectoryW(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        LocalFree(sd);
+        return;
+    }
+    SetFileSecurityW(dir.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd);
+    LocalFree(sd);
+}
+#endif
+
 bool Installed() {
     std::wstring key = std::wstring(L"Software\\Classes\\CLSID\\") + shared_frame::kSourceClsidString;
     HKEY h = nullptr;
@@ -105,6 +129,7 @@ bool Install(std::wstring* error) {
             return false;
         }
     }
+    CreateLogDir();
     HRESULT hr = CallDllExport(dst, "DllRegisterServer");
     if (FAILED(hr)) {
         *error = HrText(L"Registering the camera", hr);

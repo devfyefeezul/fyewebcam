@@ -39,6 +39,7 @@ private:
 
     HANDLE mapping_ = nullptr;
     void* view_ = nullptr;
+    bool last_live_ = false;
 };
 
 class MediaStream final : public IMFMediaStream2, public IKsControl {
@@ -93,7 +94,7 @@ private:
     UINT32 width_ = 0;
     UINT32 height_ = 0;
     UINT64 frame_duration_ = 333333;
-    LONGLONG start_time_ = 0;
+    unsigned long long requests_ = 0;
     FrameReader reader_;
     bool shut_down_ = false;
 };

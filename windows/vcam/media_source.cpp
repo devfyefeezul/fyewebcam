@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "../src/shared_frame.h"
+#include "log.h"
 
 namespace {
 
@@ -64,7 +65,10 @@ bool FrameReader::EnsureMapping() {
     mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, shared_frame::kMappingSize,
                                   shared_frame::kMappingName);
     LocalFree(sd);
-    if (!mapping_) return false;
+    if (!mapping_) {
+        vlog::Write("CreateFileMapping failed: %lu", GetLastError());
+        return false;
+    }
     view_ = MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0, shared_frame::kMappingSize);
     if (!view_) {
         CloseHandle(mapping_);
@@ -84,6 +88,10 @@ void FrameReader::Fill(uint8_t* dst, LONG pitch, UINT32 width, UINT32 height) {
     const bool live = header && header->magic == shared_frame::kMagic && (seq & 1) == 0 && header->width > 0 &&
                       header->height > 0 && header->width * header->height <= shared_frame::kMaxPixels &&
                       static_cast<int64_t>(GetTickCount64()) - header->write_time < 2000;
+    if (live != last_live_) {
+        vlog::Write("Frames from the app: %s", live ? "receiving" : "none (placeholder)");
+        last_live_ = live;
+    }
     if (!live) {
         // Placeholder: dark grey.
         for (UINT32 y = 0; y < height; ++y) memset(y_plane + static_cast<size_t>(y) * pitch, 40, width);
@@ -237,7 +245,14 @@ STDMETHODIMP MediaStream::GetStreamDescriptor(IMFStreamDescriptor** descriptor) 
 STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
-    if (state_ != MF_STREAM_STATE_RUNNING) return MF_E_INVALIDREQUEST;
+    if (state_ != MF_STREAM_STATE_RUNNING) {
+        vlog::Write("RequestSample while not running (state %d)", static_cast<int>(state_));
+        return MF_E_INVALIDREQUEST;
+    }
+    if (requests_ < 3 || requests_ % 900 == 0) {
+        vlog::Write("RequestSample #%llu (%ux%u, allocator %s)", requests_, width_, height_, allocator_ ? "yes" : "no");
+    }
+    ++requests_;
 
     ComPtr<IMFSample> sample;
     HRESULT hr;
@@ -249,7 +264,10 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
         if (SUCCEEDED(hr)) hr = MFCreateSample(sample.Put());
         if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get());
     }
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        vlog::Write("Allocating a sample failed: 0x%08lX", hr);
+        return hr;
+    }
 
     ComPtr<IMFMediaBuffer> buffer;
     hr = sample->GetBufferByIndex(0, buffer.Put());
@@ -262,9 +280,13 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
         BYTE* start = nullptr;
         DWORD length = 0;
         hr = buffer2d->Lock2DSize(MF2DBuffer_LockFlags_Write, &scanline0, &pitch, &start, &length);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            vlog::Write("Lock2DSize failed: 0x%08lX", hr);
+            return hr;
+        }
         reader_.Fill(scanline0, pitch, width_, height_);
         buffer2d->Unlock2D();
+        buffer->SetCurrentLength(length);
     } else {
         BYTE* data = nullptr;
         DWORD max_length = 0;
@@ -275,16 +297,19 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
         buffer->SetCurrentLength(width_ * height_ * 3 / 2);
     }
 
-    const LONGLONG now = MFGetSystemTime();
-    sample->SetSampleTime(now - start_time_);
+    // The Frame Server expects timestamps on the system clock (MFGetSystemTime), not stream-relative.
+    sample->SetSampleTime(MFGetSystemTime());
     sample->SetSampleDuration(static_cast<LONGLONG>(frame_duration_));
     if (token) sample->SetUnknown(MFSampleExtension_Token, token);
-    return queue_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.Get());
+    hr = queue_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.Get());
+    if (FAILED(hr)) vlog::Write("Queueing the sample failed: 0x%08lX", hr);
+    return hr;
 }
 
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE state) {
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
+    vlog::Write("SetStreamState %d", static_cast<int>(state));
     state_ = state;
     return S_OK;
 }
@@ -317,9 +342,13 @@ HRESULT MediaStream::Start(IMFMediaType* type) {
     frame_duration_ = num ? 10000000ull * den / num : 333333;
     if (allocator_) {
         hr = allocator_->InitializeSampleAllocator(10, type);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            vlog::Write("InitializeSampleAllocator failed: 0x%08lX", hr);
+            return hr;
+        }
     }
-    start_time_ = MFGetSystemTime();
+    vlog::Write("Stream start %ux%u, allocator %s", width_, height_, allocator_ ? "yes" : "no");
+    requests_ = 0;
     state_ = MF_STREAM_STATE_RUNNING;
     return queue_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr);
 }
@@ -328,6 +357,7 @@ HRESULT MediaStream::Stop() {
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
     if (allocator_) allocator_->UninitializeSampleAllocator();
+    vlog::Write("Stream stop after %llu samples", requests_);
     state_ = MF_STREAM_STATE_STOPPED;
     return queue_->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr);
 }
@@ -345,6 +375,7 @@ HRESULT MediaStream::SetAllocator(IUnknown* allocator) {
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
     allocator_.Reset();
+    vlog::Write("SetDefaultAllocator %p", static_cast<void*>(allocator));
     if (!allocator) return S_OK;
     return allocator->QueryInterface(IID_PPV_ARGS(allocator_.Put()));
 }
@@ -358,6 +389,7 @@ MediaSource::~MediaSource() {
 }
 
 HRESULT MediaSource::Initialize(IMFAttributes* attributes) {
+    vlog::Write("Media source created");
     HRESULT hr = MFCreateEventQueue(queue_.Put());
     if (FAILED(hr)) return hr;
     hr = MFCreateAttributes(attributes_.Put(), 4);
@@ -446,6 +478,7 @@ STDMETHODIMP MediaSource::CreatePresentationDescriptor(IMFPresentationDescriptor
 
 STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* descriptor, const GUID* time_format,
                                 const PROPVARIANT* start) {
+    vlog::Write("Source Start");
     if (!descriptor) return E_INVALIDARG;
     if (time_format && *time_format != GUID_NULL) return MF_E_UNSUPPORTED_TIME_FORMAT;
     std::lock_guard<std::mutex> lock(lock_);
@@ -477,7 +510,10 @@ STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* descriptor, const GUI
         if (FAILED(hr)) return hr;
         stream_announced_ = true;
         hr = stream_->Start(type.Get());
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            vlog::Write("Stream start failed: 0x%08lX", hr);
+            return hr;
+        }
     }
 
     PROPVARIANT time;
@@ -489,6 +525,7 @@ STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* descriptor, const GUI
 }
 
 STDMETHODIMP MediaSource::Stop() {
+    vlog::Write("Source Stop");
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
     stream_->Stop();
@@ -498,6 +535,7 @@ STDMETHODIMP MediaSource::Stop() {
 STDMETHODIMP MediaSource::Pause() { return MF_E_INVALID_STATE_TRANSITION; }
 
 STDMETHODIMP MediaSource::Shutdown() {
+    vlog::Write("Source Shutdown");
     std::lock_guard<std::mutex> lock(lock_);
     if (shut_down_) return MF_E_SHUTDOWN;
     shut_down_ = true;
@@ -530,7 +568,8 @@ STDMETHODIMP MediaSource::SetD3DManager(IUnknown*) {
     return S_OK;
 }
 
-STDMETHODIMP MediaSource::GetService(REFGUID, REFIID, LPVOID* object) {
+STDMETHODIMP MediaSource::GetService(REFGUID service, REFIID, LPVOID* object) {
+    vlog::Write("GetService {%08lX-...}", service.Data1);
     if (object) *object = nullptr;
     return MF_E_UNSUPPORTED_SERVICE;
 }
