@@ -5,12 +5,11 @@ Use an Android phone as a webcam for a Windows PC.
 - **android/**: the phone app. It streams the camera as H.264 over Wi-Fi or USB, and keeps
   streaming with the screen off.
 - **windows/**: the PC client. It connects to the phone and shows the video, with mirror,
-  rotate and full screen.
+  rotate and full screen. `windows/vcam/` is the virtual webcam (Windows 11), so Zoom, Teams,
+  OBS, browsers and the Camera app can pick "fyewebcam" as a camera.
 - **tools/**: `fake_phone.py` streams a test pattern so you can try the client without a phone,
   and `test_client.py` saves the phone's stream to a file.
 - **docs/PROTOCOL.md**: the wire protocol between the two apps.
-
-The virtual webcam (so Zoom, Teams and OBS can pick the phone as a camera) is the next step.
 
 ## Get the apps
 
@@ -25,6 +24,13 @@ download `fyewebcam-android` (the APK) and `fyewebcam-windows` (the exe with `ad
    - **USB:** turn on USB debugging on the phone (Settings > Developer options), plug it in,
      pick **USB** and click **Connect**. Allow the debugging prompt on the phone the first time.
 3. For the best picture, hold the phone in landscape. Use **Rotate** if the picture is sideways.
+4. **Virtual webcam (Windows 11):** click **Install virtual webcam** once and approve the Windows
+   prompt. Then pick "fyewebcam" as the camera in any app. It shows the phone while the PC app is
+   connected, and a dark picture otherwise. **Remove virtual webcam** takes it away again.
+5. **Background blur:** tick **Blur background** under Effects and pick a strength. A person
+   segmentation model (MediaPipe selfie segmenter, run with ONNX Runtime on the CPU) keeps you
+   sharp and blurs the rest, in the preview and in the virtual webcam. The stats line shows the
+   time it takes per frame.
 
 ## Build it yourself
 
