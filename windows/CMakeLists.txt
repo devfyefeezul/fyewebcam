@@ -30,6 +30,29 @@ if(MSVC)
     add_dependencies(fyewebcam fyewebcam_vcam)
 endif()
 
+# Background blur runs a person-segmentation model with ONNX Runtime, taken from its NuGet package at
+# configure time. onnxruntime.dll is copied next to the exe and loaded at run time.
+if(MSVC)
+    set(ORT_VERSION 1.29.0)
+    set(ORT_SHA256 4557021fec4da3924e2e12ff44b1cc50b176de0d2c5c7daa89ab11c208b3a454)
+    set(ORT_DIR ${CMAKE_BINARY_DIR}/onnxruntime-${ORT_VERSION})
+    if(NOT EXISTS ${ORT_DIR}/build/native/include/onnxruntime_c_api.h)
+        set(ORT_PACKAGE ${CMAKE_BINARY_DIR}/onnxruntime-${ORT_VERSION}.zip)
+        file(DOWNLOAD
+            https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg
+            ${ORT_PACKAGE} EXPECTED_HASH SHA256=${ORT_SHA256})
+        file(ARCHIVE_EXTRACT INPUT ${ORT_PACKAGE} DESTINATION ${ORT_DIR}
+            PATTERNS "build/native/include/*" "runtimes/win-x64/native/onnxruntime.dll")
+        file(REMOVE ${ORT_PACKAGE})
+    endif()
+    target_sources(fyewebcam PRIVATE src/background_blur.cpp)
+    target_include_directories(fyewebcam PRIVATE ${ORT_DIR}/build/native/include)
+    target_compile_definitions(fyewebcam PRIVATE FYE_HAVE_BLUR)
+    add_custom_command(TARGET fyewebcam POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DIR}/runtimes/win-x64/native/onnxruntime.dll
+                $<TARGET_FILE_DIR:fyewebcam>)
+endif()
+
 if(MSVC)
     target_compile_options(fyewebcam PRIVATE /W4 /utf-8)
     # Ship a single exe without the VC++ runtime installer.

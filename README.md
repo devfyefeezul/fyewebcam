@@ -27,6 +27,10 @@ download `fyewebcam-android` (the APK) and `fyewebcam-windows` (the exe with `ad
 4. **Virtual webcam (Windows 11):** click **Install virtual webcam** once and approve the Windows
    prompt. Then pick "fyewebcam" as the camera in any app. It shows the phone while the PC app is
    connected, and a dark picture otherwise. **Remove virtual webcam** takes it away again.
+5. **Background blur:** tick **Blur background** under Effects and pick a strength. A person
+   segmentation model (MediaPipe selfie segmenter, run with ONNX Runtime on the CPU) keeps you
+   sharp and blurs the rest, in the preview and in the virtual webcam. The stats line shows the
+   time it takes per frame.
 
 ## Build it yourself
 

@@ -9,9 +9,13 @@
 #include <windowsx.h>
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 
+#ifdef FYE_HAVE_BLUR
+#include "background_blur.h"
+#endif
 #include "protocol.h"
 #include "stream_client.h"
 #include "vcam.h"
@@ -47,7 +51,11 @@ enum ControlId {
     kIdRotate,
     kIdFullscreen,
     kIdVcam,
+    kIdBlur,
+    kIdBlurStrength,
 };
+constexpr int kModelResource = 2;  // RCDATA in app.rc
+constexpr int kDefaultBlurStrength = 5;
 constexpr UINT_PTR kStatsTimer = 1;
 constexpr UINT WM_APP_VCAM_DONE = WM_APP + 20;  // wParam: exit code of the elevated helper
 constexpr int kPanelWidth = 300;  // in DIPs
@@ -65,6 +73,7 @@ struct App {
     HWND lbl_camera, lbl_lens, lens, lbl_res, resolution;
     HWND lbl_status, status, stats;
     HWND lbl_vcam, vcam_text, vcam_btn;
+    HWND lbl_effects, blur_check, lbl_strength, strength;
     HWND mirror_btn, rotate_btn, fullscreen_btn;
 
     StreamClient client;
@@ -76,6 +85,12 @@ struct App {
     int rotation = 0;  // degrees clockwise: 0, 90, 180, 270
     vcam::Writer vcam_writer;
     bool vcam_busy = false;
+
+    bool blur = false;
+    int blur_strength = kDefaultBlurStrength;  // 1..10
+#ifdef FYE_HAVE_BLUR
+    std::unique_ptr<BackgroundBlur> blurrer;
+#endif
 
     bool fullscreen = false;
     WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};
@@ -116,13 +131,15 @@ void SaveSettings() {
     GetWindowTextW(g.host, host, 256);
     RegSetValueExW(key, L"Host", 0, REG_SZ, reinterpret_cast<const BYTE*>(host),
                    static_cast<DWORD>((wcslen(host) + 1) * sizeof(wchar_t)));
-    DWORD values[3] = {
+    DWORD values[5] = {
         static_cast<DWORD>(GetDlgItemInt(g.wnd, kIdPort, nullptr, FALSE)),
         static_cast<DWORD>(Button_GetCheck(g.usb) == BST_CHECKED),
         static_cast<DWORD>(ComboBox_GetCurSel(g.resolution)),
+        static_cast<DWORD>(g.blur),
+        static_cast<DWORD>(g.blur_strength),
     };
-    const wchar_t* names[3] = {L"Port", L"Usb", L"Resolution"};
-    for (int i = 0; i < 3; ++i) {
+    const wchar_t* names[5] = {L"Port", L"Usb", L"Resolution", L"Blur", L"BlurStrength"};
+    for (int i = 0; i < 5; ++i) {
         RegSetValueExW(key, names[i], 0, REG_DWORD, reinterpret_cast<const BYTE*>(&values[i]), sizeof(DWORD));
     }
     RegCloseKey(key);
@@ -201,6 +218,11 @@ void Layout() {
     place(g.vcam_text, x, Dp(524), w, Dp(54));
     place(g.vcam_btn, x, Dp(582), w, Dp(36));
 
+    place(g.lbl_effects, x, Dp(642), w, Dp(18));
+    place(g.blur_check, x, Dp(664), w, Dp(24));
+    place(g.lbl_strength, x, Dp(698), Dp(70), Dp(20));
+    place(g.strength, x + Dp(70), Dp(694), w - Dp(70), Dp(28));
+
     const int bw = Dp(110);
     const int bh = Dp(36);
     const int by = rc.bottom - Dp(20) - bh;
@@ -212,7 +234,8 @@ void Layout() {
 
 void ShowPanel(bool show) {
     for (HWND h : {g.lbl_connection, g.wifi, g.usb, g.lbl_host, g.host, g.lbl_port, g.port, g.connect, g.lbl_camera,
-                   g.lbl_lens, g.lens, g.lbl_res, g.resolution, g.lbl_status, g.status, g.stats, g.lbl_vcam, g.vcam_text, g.vcam_btn, g.mirror_btn,
+                   g.lbl_lens, g.lens, g.lbl_res, g.resolution, g.lbl_status, g.status, g.stats, g.lbl_vcam, g.vcam_text, g.vcam_btn, g.lbl_effects, g.blur_check,
+                   g.lbl_strength, g.strength, g.mirror_btn,
                    g.rotate_btn, g.fullscreen_btn}) {
         ShowWindow(h, show ? SW_SHOW : SW_HIDE);
     }
@@ -456,6 +479,46 @@ void Paint() {
     EndPaint(g.wnd, &ps);
 }
 
+// ---------- background blur ----------
+
+// Loads the segmentation model on first use. Returns false (and says why) when blur can't run.
+bool EnsureBlur() {
+#ifdef FYE_HAVE_BLUR
+    if (g.blurrer) return true;
+    HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(kModelResource), MAKEINTRESOURCEW(10));  // RT_RCDATA
+    HGLOBAL data = res ? LoadResource(nullptr, res) : nullptr;
+    const void* model = data ? LockResource(data) : nullptr;
+    std::string error = "The blur model is missing from the app.";
+    auto blurrer = std::make_unique<BackgroundBlur>();
+    if (model && blurrer->Init(model, SizeofResource(nullptr, res), &error)) {
+        g.blurrer = std::move(blurrer);
+        return true;
+    }
+    std::wstring text = L"Background blur is unavailable: ";
+    text.append(error.begin(), error.end());
+    SetStatus(text);
+    return false;
+#else
+    SetStatus(L"Background blur isn’t included in this build.");
+    return false;
+#endif
+}
+
+void ApplyBlur(Frame* frame) {
+#ifdef FYE_HAVE_BLUR
+    if (g.blur && g.blurrer) g.blurrer->Apply(frame->bgra.data(), frame->width, frame->height, g.blur_strength);
+#else
+    (void)frame;
+#endif
+}
+
+void SetBlur(bool on) {
+    if (on && !EnsureBlur()) on = false;
+    g.blur = on;
+    Button_SetCheck(g.blur_check, on ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(g.strength, on);
+}
+
 // ---------- window ----------
 
 void CreateControls() {
@@ -482,6 +545,12 @@ void CreateControls() {
     g.vcam_text = MakeControl(L"STATIC", L"", SS_LEFT);
     g.vcam_btn = MakeControl(L"BUTTON", L"Install virtual webcam", BS_PUSHBUTTON | WS_TABSTOP, kIdVcam);
 
+    g.lbl_effects = MakeControl(L"STATIC", L"EFFECTS", SS_LEFT);
+    g.blur_check = MakeControl(L"BUTTON", L"Blur background", BS_AUTOCHECKBOX | WS_TABSTOP, kIdBlur);
+    g.lbl_strength = MakeControl(L"STATIC", L"Strength", SS_LEFT);
+    g.strength = MakeControl(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, kIdBlurStrength);
+    SendMessageW(g.strength, TBM_SETRANGE, FALSE, MAKELPARAM(1, 10));
+
     g.mirror_btn = MakeControl(L"BUTTON", L"Mirror", BS_PUSHBUTTON | WS_TABSTOP, kIdMirror);
     g.rotate_btn = MakeControl(L"BUTTON", L"Rotate", BS_PUSHBUTTON | WS_TABSTOP, kIdRotate);
     g.fullscreen_btn = MakeControl(L"BUTTON", L"Full screen", BS_PUSHBUTTON | WS_TABSTOP, kIdFullscreen);
@@ -499,7 +568,7 @@ void CreateControls() {
     for (HWND h : {g.connect, g.vcam_btn, g.mirror_btn, g.rotate_btn, g.fullscreen_btn}) SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
     for (HWND h : {g.lens, g.resolution, g.host, g.port}) SetWindowTheme(h, L"DarkMode_CFD", nullptr);
     // Unthemed radios so WM_CTLCOLORSTATIC can color their labels.
-    for (HWND h : {g.wifi, g.usb}) SetWindowTheme(h, L"", L"");
+    for (HWND h : {g.wifi, g.usb, g.blur_check}) SetWindowTheme(h, L"", L"");
 
     // Restore the last settings.
     SetWindowTextW(g.host, RegString(L"Host", L"").c_str());
@@ -510,6 +579,10 @@ void CreateControls() {
     ComboBox_SetCurSel(g.resolution, res < 3 ? res : 1);
     UpdateConnectButton();
     UpdateVcamUi();
+    const DWORD strength = RegDword(L"BlurStrength", kDefaultBlurStrength);
+    g.blur_strength = strength >= 1 && strength <= 10 ? static_cast<int>(strength) : kDefaultBlurStrength;
+    SendMessageW(g.strength, TBM_SETPOS, TRUE, g.blur_strength);
+    SetBlur(RegDword(L"Blur", 0) != 0);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -552,8 +625,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CTLCOLORBTN: {
             HDC dc = reinterpret_cast<HDC>(wp);
             HWND ctl = reinterpret_cast<HWND>(lp);
-            const bool heading = ctl == g.lbl_connection || ctl == g.lbl_camera || ctl == g.lbl_status || ctl == g.lbl_vcam;
-            const bool field_label = ctl == g.lbl_host || ctl == g.lbl_port || ctl == g.lbl_lens || ctl == g.lbl_res;
+            const bool heading = ctl == g.lbl_connection || ctl == g.lbl_camera || ctl == g.lbl_status ||
+                                 ctl == g.lbl_vcam || ctl == g.lbl_effects;
+            const bool field_label = ctl == g.lbl_host || ctl == g.lbl_port || ctl == g.lbl_lens || ctl == g.lbl_res ||
+                                     ctl == g.lbl_strength;
             SetTextColor(dc, heading || field_label ? kMuted : kText);
             SetBkColor(dc, kPanel);
             return reinterpret_cast<LRESULT>(g.panel_brush);
@@ -603,7 +678,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 case kIdRotate:
                     g.rotation = (g.rotation + 90) % 360;
-                    if (g.has_frame) RotateFrame(g.raw, &g.shown);
+                    if (g.has_frame) {
+                        RotateFrame(g.raw, &g.shown);
+                        ApplyBlur(&g.shown);
+                    }
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 case kIdFullscreen:
@@ -612,9 +690,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case kIdVcam:
                     ToggleVcam();
                     return 0;
+                case kIdBlur:
+                    if (code == BN_CLICKED) {
+                        SetBlur(Button_GetCheck(g.blur_check) == BST_CHECKED);
+                        SaveSettings();
+                    }
+                    return 0;
             }
             break;
         }
+        case WM_HSCROLL:
+            if (reinterpret_cast<HWND>(lp) == g.strength) {
+                g.blur_strength = static_cast<int>(SendMessageW(g.strength, TBM_GETPOS, 0, 0));
+                if (LOWORD(wp) == TB_ENDTRACK) SaveSettings();
+                return 0;
+            }
+            break;
         case WM_LBUTTONDBLCLK:
             ToggleFullscreen();
             return 0;
@@ -625,6 +716,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.client.TakeCounters(&frames, &bytes);
                 wchar_t text[96];
                 swprintf(text, 96, L"%d fps  ·  %.1f Mbps", frames, bytes * 8 / 1e6);
+#ifdef FYE_HAVE_BLUR
+                if (g.blur && g.blurrer) {
+                    const size_t len = wcslen(text);
+                    swprintf(text + len, 96 - len, L"  ·  blur %.0f ms", g.blurrer->LastMs());
+                }
+#endif
                 SetWindowTextW(g.stats, text);
             }
             return 0;
@@ -644,6 +741,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_FRAME:
             if (wp == g.client.Session() && g.client.TakeFrame(&g.raw)) {
                 RotateFrame(g.raw, &g.shown);
+                ApplyBlur(&g.shown);
                 g.has_frame = true;
                 const bool was_active = g.vcam_writer.Active();
                 g.vcam_writer.Write(g.shown);
@@ -692,7 +790,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int show) {
     WSAStartup(MAKEWORD(2, 2), &wsa);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
 
     g.panel_brush = CreateSolidBrush(kPanel);
