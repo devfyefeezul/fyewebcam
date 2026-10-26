@@ -22,6 +22,8 @@ if(MSVC)
     target_compile_options(fyewebcam PRIVATE /W4 /utf-8)
     # Ship a single exe without the VC++ runtime installer.
     set_property(TARGET fyewebcam PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # app.rc embeds our own manifest (common controls v6, per-monitor DPI).
+    target_link_options(fyewebcam PRIVATE /MANIFEST:NO)
 else()
     target_compile_options(fyewebcam PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
     target_link_options(fyewebcam PRIVATE -static -municode)
